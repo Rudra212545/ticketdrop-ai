@@ -1,0 +1,36 @@
+# Environment & Secrets
+.env
+.env.local
+*.pem
+*.key
+
+# Java / Maven
+target/
+!.mvn/wrapper/maven-wrapper.jar
+*.class
+*.jar
+*.war
+*.ear
+*.log
+
+# IDEs
+.idea/
+*.iml
+.vscode/
+.settings/
+.classpath
+.project
+
+# Node / React
+node_modules/
+dist/
+.vite/
+
+# Flutter (Phase 6)
+mobile/.dart_tool/
+mobile/build/
+
+# OS
+.DS_Store
+Thumbs.db
+
