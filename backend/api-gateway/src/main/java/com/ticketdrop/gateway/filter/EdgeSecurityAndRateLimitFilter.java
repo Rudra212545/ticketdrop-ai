@@ -10,7 +10,9 @@ import org.springframework.cloud.gateway.filter.GatewayFilterChain;
 import org.springframework.cloud.gateway.filter.GlobalFilter;
 import org.springframework.core.Ordered;
 import org.springframework.data.redis.core.ReactiveStringRedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.server.reactive.ServerHttpRequest;
 import org.springframework.stereotype.Component;
@@ -19,18 +21,26 @@ import reactor.core.publisher.Mono;
 
 import javax.crypto.SecretKey;
 import java.nio.charset.StandardCharsets;
-import java.time.Duration;
+import java.util.Collections;
+import java.util.List;
 import java.util.UUID;
 
 /**
- * Edge filter: assigns X-Correlation-Id, enforces Redis-backed anti-bot rate limits,
+ * Edge filter: assigns X-Correlation-Id, enforces atomic Redis Lua anti-bot rate limits,
  * and rejects blacklisted JWTs or banned users before requests ever hit downstream services.
  */
 @Component
 public class EdgeSecurityAndRateLimitFilter implements GlobalFilter, Ordered {
 
-    private static final long AUTH_LIMIT_PER_MINUTE = 60;
-    private static final long DEFAULT_LIMIT_PER_MINUTE = 240;
+    private static final long AUTH_LIMIT_PER_MINUTE = 120;
+    private static final long DEFAULT_LIMIT_PER_MINUTE = 1000;
+
+    private static final DefaultRedisScript<Long> RATE_LIMIT_SCRIPT = new DefaultRedisScript<>(
+            "local c = redis.call('INCR', KEYS[1]); " +
+            "if c == 1 or redis.call('TTL', KEYS[1]) == -1 then redis.call('EXPIRE', KEYS[1], 60) end; " +
+            "return c",
+            Long.class
+    );
 
     private final ReactiveStringRedisTemplate redis;
     private final SecretKey signingKey;
@@ -45,6 +55,10 @@ public class EdgeSecurityAndRateLimitFilter implements GlobalFilter, Ordered {
 
     @Override
     public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
+        if (exchange.getRequest().getMethod() == HttpMethod.OPTIONS) {
+            return chain.filter(exchange);
+        }
+
         String path = exchange.getRequest().getURI().getPath();
         String correlationId = exchange.getRequest().getHeaders().getFirst(KafkaTopics.HEADER_CORRELATION_ID);
         if (correlationId == null || correlationId.isBlank()) {
@@ -103,14 +117,10 @@ public class EdgeSecurityAndRateLimitFilter implements GlobalFilter, Ordered {
     }
 
     private Mono<Boolean> checkRateLimit(String key, long limit) {
-        return redis.opsForValue().increment(key)
-                .flatMap(count -> {
-                    if (count != null && count == 1L) {
-                        return redis.expire(key, Duration.ofMinutes(1)).thenReturn(true);
-                    }
-                    return Mono.just(count == null || count <= limit);
-                })
-                .onErrorReturn(true); // Fail-open if Redis has transient network blip
+        return redis.execute(RATE_LIMIT_SCRIPT, Collections.singletonList(key), List.of())
+                .next()
+                .map(count -> count <= limit)
+                .onErrorReturn(true);
     }
 
     @Override
@@ -118,4 +128,3 @@ public class EdgeSecurityAndRateLimitFilter implements GlobalFilter, Ordered {
         return -100;
     }
 }
-

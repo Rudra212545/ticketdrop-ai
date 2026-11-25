@@ -97,13 +97,13 @@ export default function DashboardLayout({
 
       {/* Main Content Area */}
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="sticky top-0 z-20 flex h-16 items-center justify-between border-b border-zinc-200 bg-white/85 px-6 backdrop-blur dark:border-zinc-800/80 dark:bg-[#09090B]/85">
-          <div>
-            <h1 className="text-base font-bold tracking-tight text-zinc-900 dark:text-white">
+        <header className="sticky top-0 z-20 flex h-16 items-center justify-between gap-3 border-b border-zinc-200 bg-white/85 px-4 backdrop-blur sm:px-6 dark:border-zinc-800/80 dark:bg-[#09090B]/85">
+          <div className="min-w-0">
+            <h1 className="truncate text-sm font-bold tracking-tight text-zinc-900 sm:text-base dark:text-white">
               {pageTitle}
             </h1>
             {pageSubtitle && (
-              <p className="hidden text-xs text-zinc-500 sm:block">{pageSubtitle}</p>
+              <p className="hidden truncate text-xs text-zinc-500 sm:block">{pageSubtitle}</p>
             )}
           </div>
 
@@ -153,7 +153,7 @@ export default function DashboardLayout({
             })}
         </div>
 
-        <main className="mx-auto w-full max-w-6xl flex-1 p-6">{children}</main>
+        <main className="mx-auto w-full max-w-6xl flex-1 p-4 sm:p-6">{children}</main>
       </div>
     </div>
   );

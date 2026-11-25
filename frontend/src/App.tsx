@@ -6,6 +6,7 @@ import AuthPage from './pages/AuthPage';
 import OrganizerAuthPage from './pages/OrganizerAuthPage';
 import SuperAdminLoginPage from './pages/SuperAdminLoginPage';
 import UserPortal from './pages/UserPortal';
+import EventBookingPage from './pages/EventBookingPage';
 import AdminPortal from './pages/AdminPortal';
 import SuperAdminPortal from './pages/SuperAdminPortal';
 import type { Role } from './types/auth';
@@ -45,6 +46,14 @@ export default function App() {
             element={
               <RequireRole role="USER">
                 <UserPortal />
+              </RequireRole>
+            }
+          />
+          <Route
+            path="/events/:eventId"
+            element={
+              <RequireRole role="USER">
+                <EventBookingPage />
               </RequireRole>
             }
           />

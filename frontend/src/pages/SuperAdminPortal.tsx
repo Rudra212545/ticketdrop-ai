@@ -197,7 +197,7 @@ export default function SuperAdminPortal() {
           </div>
 
           <div className="overflow-x-auto">
-            <table className="w-full text-left text-sm">
+            <table className="w-full min-w-[640px] text-left text-sm">
               <thead className="border-b border-zinc-200 bg-zinc-50 text-[11px] font-semibold uppercase tracking-wider text-zinc-500 dark:border-zinc-800/80 dark:bg-zinc-950/50">
                 <tr>
                   <th className="px-5 py-3">Organization</th>
@@ -314,7 +314,7 @@ export default function SuperAdminPortal() {
           </div>
 
           <div className="overflow-x-auto">
-            <table className="w-full text-left text-sm">
+            <table className="w-full min-w-[640px] text-left text-sm">
               <thead className="border-b border-zinc-200 bg-zinc-50 text-[11px] font-semibold uppercase tracking-wider text-zinc-500 dark:border-zinc-800/80 dark:bg-zinc-950/50">
                 <tr>
                   <th className="px-5 py-3">Account</th>
@@ -381,7 +381,7 @@ export default function SuperAdminPortal() {
       {tab === 'audit' && (
         <div className="mt-6 overflow-hidden rounded-2xl border border-zinc-200 bg-white dark:border-zinc-800/80 dark:bg-[#111114]">
           <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs">
+            <table className="w-full min-w-[640px] text-left text-xs">
               <thead className="border-b border-zinc-200 bg-zinc-50 font-semibold uppercase tracking-wider text-zinc-500 dark:border-zinc-800/80 dark:bg-zinc-950/50">
                 <tr>
                   <th className="px-5 py-3">Timestamp</th>
