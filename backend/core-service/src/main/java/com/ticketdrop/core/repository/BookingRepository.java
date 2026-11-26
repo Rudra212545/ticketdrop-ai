@@ -21,5 +21,9 @@ public interface BookingRepository extends JpaRepository<Booking, UUID> {
     List<Booking> findByUserIdOrderByCreatedAtDesc(UUID userId);
 
     List<Booking> findByStatusAndExpiresAtBefore(BookingStatus status, Instant cutoff);
+
+    List<Booking> findByEventIdAndStatusIn(UUID eventId, List<BookingStatus> statuses);
+
+    long countByEventId(UUID eventId);
 }
 

@@ -60,5 +60,33 @@ public class AdminEventController {
         UserPrincipal principal = (UserPrincipal) authentication.getPrincipal();
         return ResponseEntity.ok(eventService.publishEvent(eventId, principal.id()));
     }
+
+    @DeleteMapping("/{eventId}")
+    public ResponseEntity<Void> deleteEvent(
+            @PathVariable UUID eventId,
+            Authentication authentication
+    ) {
+        UserPrincipal principal = (UserPrincipal) authentication.getPrincipal();
+        eventService.deleteEvent(eventId, principal.id());
+        return ResponseEntity.noContent().build();
+    }
+
+    @PatchMapping("/{eventId}/cancel")
+    public ResponseEntity<EventSummary> cancelEvent(
+            @PathVariable UUID eventId,
+            Authentication authentication
+    ) {
+        UserPrincipal principal = (UserPrincipal) authentication.getPrincipal();
+        return ResponseEntity.ok(eventService.cancelEvent(eventId, principal.id()));
+    }
+
+    @PatchMapping("/{eventId}/complete")
+    public ResponseEntity<EventSummary> completeEvent(
+            @PathVariable UUID eventId,
+            Authentication authentication
+    ) {
+        UserPrincipal principal = (UserPrincipal) authentication.getPrincipal();
+        return ResponseEntity.ok(eventService.completeEvent(eventId, principal.id()));
+    }
 }
 

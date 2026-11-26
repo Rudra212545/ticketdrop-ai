@@ -33,6 +33,7 @@ import {
   type SeatDto,
   type SeatMapResponse,
   type TierSummary,
+  type WaitlistEntryResponse,
 } from '../types/event';
 
 const CATEGORY_COVERS: Record<string, string> = {
@@ -111,7 +112,21 @@ export default function EventBookingPage() {
   const [queueState, setQueueState] = useState<QueueStatusResponse | null>(null);
   const [booking, setBooking] = useState<BookingResponse | null>(null);
   const [remainingSec, setRemainingSec] = useState<number>(0);
-  const [error, setError] = useState<string | null>(null);
+  const [toastPopup, setToastPopup] = useState<{ type: 'success' | 'error' | 'info'; title: string; message: string } | null>(null);
+  const [paymentDeclinedModal, setPaymentDeclinedModal] = useState<string | null>(null);
+  const [offerModalEntry, setOfferModalEntry] = useState<WaitlistEntryResponse | null>(null);
+  const [dismissedOfferIds, setDismissedOfferIds] = useState<Set<string>>(new Set());
+  const [offerRemainingSec, setOfferRemainingSec] = useState<number>(0);
+
+  const showPopup = (type: 'success' | 'error' | 'info', title: string, message: string) => {
+    setToastPopup({ type, title, message });
+  };
+
+  useEffect(() => {
+    if (!toastPopup) return;
+    const t = setTimeout(() => setToastPopup(null), 5000);
+    return () => clearTimeout(t);
+  }, [toastPopup]);
 
   const seatMapQuery = useQuery({
     queryKey: ['seatmap', eventId],
@@ -120,13 +135,14 @@ export default function EventBookingPage() {
     enabled: Boolean(eventId),
   });
 
-  // Real-time Server-Sent Events (SSE) subscription for instant (<50ms) seat sync
+  // Real-time Server-Sent Events (SSE) subscription for instant (<50ms) seat & waitlist sync
   useEffect(() => {
     if (!eventId) return;
     const baseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080/api/v1';
     const es = new EventSource(`${baseUrl}/events/${eventId}/seatmap/stream`);
     es.addEventListener('seat-update', () => {
       queryClient.invalidateQueries({ queryKey: ['seatmap', eventId] });
+      queryClient.invalidateQueries({ queryKey: ['my-waitlist'] });
     });
     return () => es.close();
   }, [eventId, queryClient]);
@@ -157,10 +173,9 @@ export default function EventBookingPage() {
       (await apiClient.post<QueueStatusResponse>(`/events/${eventId}/queue/join`)).data,
     onSuccess: (data) => {
       setQueueState(data);
-      setError(null);
     },
     onError: (err: unknown) => {
-      setError((err as { response?: { data?: { detail?: string } } })?.response?.data?.detail || 'Could not join queue');
+      showPopup('error', 'Queue Error', (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail || 'Could not join queue');
     },
   });
 
@@ -213,11 +228,13 @@ export default function EventBookingPage() {
     },
     onSuccess: (data) => {
       setBooking(data);
-      setError(null);
+      showPopup('info', 'Reserved for 10 Minutes', 'Complete payment before the timer expires to mint your QR passes.');
       queryClient.invalidateQueries({ queryKey: ['seatmap', eventId] });
     },
     onError: (err: unknown) => {
-      setError(
+      showPopup(
+        'error',
+        'Selection Unavailable',
         (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
           'One or more selected seats were just taken. Please pick different seats.',
       );
@@ -234,16 +251,109 @@ export default function EventBookingPage() {
       ).data,
     onSuccess: (data) => {
       setBooking(data);
+      setPaymentDeclinedModal(null);
+      showPopup('success', 'Payment Confirmed!', 'Your verified QR passes are ready in My Passes.');
       queryClient.invalidateQueries({ queryKey: ['seatmap', eventId] });
       queryClient.invalidateQueries({ queryKey: ['my-tickets'] });
-      if (data.status === 'FAILED') {
-        setBooking(null);
-        setSelectedIds([]);
-        setError('Payment was cancelled or declined. Your seats have been released back to the venue map.');
-      }
     },
     onError: (err: unknown) => {
-      setError((err as { response?: { data?: { detail?: string } } })?.response?.data?.detail || 'Payment error');
+      const detail =
+        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
+        'Your payment was declined by the bank. Your seats are still safely held—retry payment before the timer expires.';
+      setPaymentDeclinedModal(detail);
+    },
+  });
+
+  const cancelBookingMutation = useMutation({
+    mutationFn: async () =>
+      (await apiClient.post<BookingResponse>(`/bookings/${booking!.id}/cancel`)).data,
+    onSuccess: () => {
+      setBooking(null);
+      setPaymentDeclinedModal(null);
+      setSelectedIds([]);
+      setStandingQty({});
+      showPopup('info', 'Order Cancelled', 'Your seats/passes have been released back to the venue.');
+      queryClient.invalidateQueries({ queryKey: ['seatmap', eventId] });
+    },
+  });
+
+  const myWaitlistQuery = useQuery({
+    queryKey: ['my-waitlist'],
+    queryFn: async () => (await apiClient.get<WaitlistEntryResponse[]>('/waitlist/me')).data,
+    refetchInterval: 5000,
+  });
+
+  const joinedTierMap = useMemo(() => {
+    const map = new Map<string, WaitlistEntryResponse>();
+    for (const entry of myWaitlistQuery.data ?? []) {
+      if (entry.eventId === eventId && (entry.status === 'WAITING' || entry.status === 'OFFERED')) {
+        map.set(entry.tierId, entry);
+      }
+    }
+    return map;
+  }, [myWaitlistQuery.data, eventId]);
+
+  // Automatically pop up the Waitlist Offer Modal if an OFFERED pass arrives while user is on this page!
+  useEffect(() => {
+    if (booking) return;
+    for (const entry of joinedTierMap.values()) {
+      if (entry.status === 'OFFERED' && !dismissedOfferIds.has(entry.id)) {
+        setOfferModalEntry(entry);
+        return;
+      }
+    }
+  }, [joinedTierMap, dismissedOfferIds, booking]);
+
+  useEffect(() => {
+    if (!offerModalEntry?.offerExpiresAt) {
+      setOfferRemainingSec(0);
+      return;
+    }
+    const update = () => {
+      const diff = Math.max(0, Math.floor((new Date(offerModalEntry.offerExpiresAt!).getTime() - Date.now()) / 1000));
+      setOfferRemainingSec(diff);
+    };
+    update();
+    const timer = setInterval(update, 1000);
+    return () => clearInterval(timer);
+  }, [offerModalEntry]);
+
+  const joinWaitlistMutation = useMutation({
+    mutationFn: async (tierId: string) =>
+      apiClient.post('/waitlist', { eventId, tierId }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['my-waitlist'] });
+      showPopup('success', 'Joined Auto-Waitlist', "You'll get an instant 5-minute claim popup the moment a hold releases.");
+    },
+    onError: (err: unknown) => {
+      showPopup('error', 'Waitlist Error', (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail || 'Could not join waitlist');
+    },
+  });
+
+  const leaveWaitlistMutation = useMutation({
+    mutationFn: async (entryId: string) => apiClient.delete(`/waitlist/${entryId}`),
+    onSuccess: () => {
+      setOfferModalEntry(null);
+      queryClient.invalidateQueries({ queryKey: ['my-waitlist'] });
+      showPopup('info', 'Removed from Waitlist', 'You have left the waitlist for this tier.');
+    },
+    onError: (err: unknown) => {
+      showPopup('error', 'Waitlist Error', (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail || 'Could not leave waitlist');
+    },
+  });
+
+  const claimOfferOnPageMutation = useMutation({
+    mutationFn: async (entryId: string) =>
+      (await apiClient.post<BookingResponse>(`/waitlist/${entryId}/claim`)).data,
+    onSuccess: (claimedBooking) => {
+      setOfferModalEntry(null);
+      setBooking(claimedBooking);
+      showPopup('success', 'Waitlist Offer Claimed!', 'Complete payment below to mint your verified QR pass.');
+      queryClient.invalidateQueries({ queryKey: ['my-waitlist'] });
+      queryClient.invalidateQueries({ queryKey: ['seatmap', eventId] });
+    },
+    onError: (err: unknown) => {
+      showPopup('error', 'Claim Failed', (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail || 'Offer could not be claimed.');
     },
   });
 
@@ -276,7 +386,6 @@ export default function EventBookingPage() {
 
   const adjustStandingQty = (tier: TierSummary, delta: number) => {
     if (booking) return;
-    setError(null);
     setStandingQty((prev) => {
       const current = prev[tier.id] ?? 0;
       const next = current + delta;
@@ -289,7 +398,6 @@ export default function EventBookingPage() {
   const toggleSeat = (seat: SeatDto) => {
     if (booking) return;
     if (seat.status !== 'AVAILABLE' && !seat.lockedByCurrentUser) return;
-    setError(null);
     setSelectedIds((prev) => {
       if (prev.includes(seat.id)) return prev.filter((id) => id !== seat.id);
       if (prev.length >= 6) return prev;
@@ -428,12 +536,6 @@ export default function EventBookingPage() {
                 </div>
               </div>
             </div>
-
-            {error && (
-              <div className="mt-4 rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-xs font-medium text-rose-600 sm:text-sm dark:text-rose-300">
-                {error}
-              </div>
-            )}
 
             {/* Automatic Fair Queue */}
             {needsQueue ? (
@@ -891,6 +993,79 @@ export default function EventBookingPage() {
                       <p className="mt-3 text-center text-[11px] text-zinc-500">
                         Seats are held exclusively for 10 minutes once confirmed.
                       </p>
+
+                      {/* Smart Auto-Waitlist Join Section */}
+                      {tierSections.length > 0 && (
+                        <div className="mt-5 rounded-2xl border border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-800 dark:bg-zinc-950/70">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-bold text-zinc-900 dark:text-white">
+                              Smart Auto-Waitlist
+                            </span>
+                            <span className="font-mono text-[10px] font-semibold text-amber-500">
+                              5-MIN AUTO-OFFER
+                            </span>
+                          </div>
+                          <p className="mt-1 text-[11px] text-zinc-500">
+                            Waiting for better seats or a sold-out tier? Get auto-offered the instant a hold expires.
+                          </p>
+                          <div className="mt-3 flex flex-wrap gap-1.5">
+                            {tierSections.map(({ tier }) => {
+                              const existingEntry = joinedTierMap.get(tier.id);
+                              if (existingEntry) {
+                                if (existingEntry.status === 'OFFERED') {
+                                  return (
+                                    <button
+                                      key={tier.id}
+                                      type="button"
+                                      onClick={() => setOfferModalEntry(existingEntry)}
+                                      className="inline-flex items-center gap-1.5 rounded-lg border border-[#FF3366]/50 bg-[#FF3366] px-3 py-1.5 text-[11px] font-bold text-white shadow-md shadow-[#FF3366]/30 transition hover:bg-[#E62958]"
+                                    >
+                                      <Sparkles className="h-3 w-3 shrink-0" />
+                                      Claim {tier.name} Offer!
+                                    </button>
+                                  );
+                                }
+                                return (
+                                  <button
+                                    key={tier.id}
+                                    type="button"
+                                    disabled={leaveWaitlistMutation.isPending}
+                                    onClick={() => leaveWaitlistMutation.mutate(existingEntry.id)}
+                                    title="Click to leave waitlist"
+                                    className="group inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/35 bg-emerald-500/15 px-2.5 py-1.5 text-[11px] font-bold text-emerald-600 transition hover:border-rose-500/40 hover:bg-rose-500/15 hover:text-rose-500 disabled:opacity-50 dark:text-emerald-400 dark:hover:text-rose-400"
+                                  >
+                                    <CheckCircle2 className="h-3 w-3 shrink-0 group-hover:hidden" />
+                                    <X className="hidden h-3 w-3 shrink-0 group-hover:block" />
+                                    <span>
+                                      {tier.name} · Waitlisted (#{existingEntry.queuePosition})
+                                    </span>
+                                  </button>
+                                );
+                              }
+                              return (
+                                <button
+                                  key={tier.id}
+                                  type="button"
+                                  disabled={joinWaitlistMutation.isPending}
+                                  onClick={() => joinWaitlistMutation.mutate(tier.id)}
+                                  className="rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-[11px] font-semibold text-zinc-700 transition hover:border-[#FF3366]/50 hover:text-[#FF3366] dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300"
+                                >
+                                  + Join {tier.name}
+                                </button>
+                              );
+                            })}
+                          </div>
+                          {joinedTierMap.size > 0 && (
+                            <p className="mt-2 text-[11px] font-semibold text-emerald-500">
+                              You&apos;re on the waitlist! Manage or claim offers in your{' '}
+                              <Link to="/user" className="underline hover:text-emerald-400">
+                                Fan Dashboard
+                              </Link>
+                              .
+                            </p>
+                          )}
+                        </div>
+                      )}
                     </>
                   ) : (
                     <div className="mt-4 space-y-3 text-xs">
@@ -912,7 +1087,7 @@ export default function EventBookingPage() {
                       </div>
 
                       <button
-                        disabled={confirmPaymentMutation.isPending}
+                        disabled={confirmPaymentMutation.isPending || cancelBookingMutation.isPending}
                         onClick={() => confirmPaymentMutation.mutate(false)}
                         className="mt-2 flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 py-3 text-sm font-bold text-white shadow-md transition hover:bg-emerald-500 disabled:opacity-50"
                       >
@@ -921,11 +1096,19 @@ export default function EventBookingPage() {
                       </button>
 
                       <button
-                        disabled={confirmPaymentMutation.isPending}
+                        disabled={confirmPaymentMutation.isPending || cancelBookingMutation.isPending}
                         onClick={() => confirmPaymentMutation.mutate(true)}
+                        className="flex w-full items-center justify-center gap-1.5 rounded-xl border border-amber-500/30 bg-amber-500/10 py-2 text-xs font-semibold text-amber-600 hover:bg-amber-500/20 dark:text-amber-400"
+                      >
+                        <XCircle className="h-3.5 w-3.5" /> Simulate Bank Decline (Keep Lock & Retry)
+                      </button>
+
+                      <button
+                        disabled={confirmPaymentMutation.isPending || cancelBookingMutation.isPending}
+                        onClick={() => cancelBookingMutation.mutate()}
                         className="flex w-full items-center justify-center gap-1.5 rounded-xl border border-rose-500/30 bg-rose-500/10 py-2 text-xs font-semibold text-rose-600 hover:bg-rose-500/20 dark:text-rose-400"
                       >
-                        <XCircle className="h-3.5 w-3.5" /> Cancel / Simulate Failed Payment
+                        <XCircle className="h-3.5 w-3.5" /> Cancel Order &amp; Release Seats
                       </button>
                     </div>
                   )}
@@ -956,6 +1139,207 @@ export default function EventBookingPage() {
             >
               {confirmSeatsMutation.isPending ? 'Reserving...' : isStanding ? 'Confirm Passes' : 'Confirm Seats'}
               <ArrowRight className="h-4 w-4" />
+            </button>
+          </div>
+        </div>
+      )}
+      {/* Auto-Waitlist Exclusive Offer Popup Modal */}
+      {offerModalEntry && (
+        <div
+          onClick={() => {
+            setDismissedOfferIds((prev) => new Set(prev).add(offerModalEntry.id));
+            setOfferModalEntry(null);
+          }}
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-md"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="animate-modal-pop w-full max-w-md overflow-hidden rounded-3xl border border-[#FF3366]/40 bg-white shadow-2xl dark:bg-[#111115]"
+          >
+            <div className="h-2 bg-gradient-to-r from-[#FF3366] via-amber-500 to-[#FF3366]" />
+            <div className="p-6">
+              <div className="flex items-start justify-between gap-3">
+                <div className="inline-flex items-center gap-1.5 rounded-full bg-[#FF3366]/15 px-3 py-1 font-mono text-[10px] font-extrabold text-[#FF3366]">
+                  <Sparkles className="h-3 w-3" /> EXCLUSIVE WAITLIST OFFER
+                </div>
+                <span className="rounded-lg bg-amber-500/15 px-2.5 py-1 font-mono text-xs font-extrabold text-amber-600 tabular-nums dark:text-amber-400">
+                  {String(Math.floor(offerRemainingSec / 60)).padStart(2, '0')}:
+                  {String(offerRemainingSec % 60).padStart(2, '0')} left
+                </span>
+              </div>
+
+              <h3 className="mt-4 text-xl font-extrabold text-zinc-900 dark:text-white">
+                Your {isStanding ? 'Pass' : 'Seat'} Just Unlocked!
+              </h3>
+              <p className="mt-1.5 text-xs leading-relaxed text-zinc-500">
+                A hold just released on <strong>{offerModalEntry.eventTitle}</strong>. We locked it exclusively for you for 5 minutes.
+              </p>
+
+              <div className="mt-4 rounded-2xl border border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-800 dark:bg-zinc-950">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className="font-mono text-[10px] font-semibold uppercase text-zinc-400">OFFERED PASS</div>
+                    <div className="mt-0.5 text-sm font-extrabold text-zinc-900 dark:text-white">
+                      {offerModalEntry.offeredSeatLabel ?? offerModalEntry.tierName}
+                    </div>
+                    <div className="text-xs text-zinc-500">{offerModalEntry.tierName}</div>
+                  </div>
+                  <div className="text-right">
+                    <div className="font-mono text-[10px] font-semibold uppercase text-zinc-400">PRICE</div>
+                    <div className="font-mono text-lg font-extrabold text-[#FF3366]">
+                      {formatRupees(offerModalEntry.tierPricePaise)}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-5 flex flex-col gap-2.5">
+                <button
+                  type="button"
+                  disabled={claimOfferOnPageMutation.isPending}
+                  onClick={() => claimOfferOnPageMutation.mutate(offerModalEntry.id)}
+                  className="flex w-full items-center justify-center gap-2 rounded-xl bg-[#FF3366] py-3 text-sm font-bold text-white shadow-lg shadow-[#FF3366]/30 transition hover:bg-[#E62958] disabled:opacity-50"
+                >
+                  <CheckCircle2 className="h-4 w-4" />
+                  {claimOfferOnPageMutation.isPending ? 'Claiming...' : 'Claim & Proceed to Payment'}
+                </button>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    disabled={leaveWaitlistMutation.isPending}
+                    onClick={() => leaveWaitlistMutation.mutate(offerModalEntry.id)}
+                    className="rounded-xl border border-rose-500/30 bg-rose-500/10 py-2 text-xs font-semibold text-rose-600 transition hover:bg-rose-500/20 dark:text-rose-400"
+                  >
+                    Decline Offer
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDismissedOfferIds((prev) => new Set(prev).add(offerModalEntry.id));
+                      setOfferModalEntry(null);
+                    }}
+                    className="rounded-xl border border-zinc-200 py-2 text-xs font-semibold text-zinc-600 transition hover:bg-zinc-100 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-900"
+                  >
+                    Decide Later
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Payment Declined Popup Modal (BookMyShow-style Keep Lock & Retry) */}
+      {paymentDeclinedModal && (
+        <div
+          onClick={() => setPaymentDeclinedModal(null)}
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-md"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="animate-modal-pop w-full max-w-md overflow-hidden rounded-3xl border border-amber-500/40 bg-white shadow-2xl dark:bg-[#111115]"
+          >
+            <div className="h-2 bg-gradient-to-r from-amber-500 to-rose-500" />
+            <div className="p-6">
+              <div className="flex items-start gap-3">
+                <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-amber-500/15 text-amber-500">
+                  <XCircle className="h-6 w-6" />
+                </div>
+                <div>
+                  <h3 className="text-base font-extrabold text-zinc-900 dark:text-white">
+                    Payment Declined by Bank
+                  </h3>
+                  <p className="mt-1 text-xs leading-relaxed text-zinc-600 dark:text-zinc-400">
+                    {paymentDeclinedModal}
+                  </p>
+                </div>
+              </div>
+
+              <div className="mt-4 flex items-center justify-between rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-xs font-semibold text-emerald-700 dark:text-emerald-300">
+                <span className="inline-flex items-center gap-1.5">
+                  <Lock className="h-3.5 w-3.5" /> Your hold is still protected
+                </span>
+                <span className="font-mono font-extrabold tabular-nums">
+                  {mins}:{secs} left
+                </span>
+              </div>
+
+              <div className="mt-5 flex flex-col gap-2">
+                <button
+                  type="button"
+                  disabled={confirmPaymentMutation.isPending}
+                  onClick={() => confirmPaymentMutation.mutate(false)}
+                  className="flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 py-3 text-sm font-bold text-white shadow-md transition hover:bg-emerald-500 disabled:opacity-50"
+                >
+                  <CheckCircle2 className="h-4 w-4" />
+                  {confirmPaymentMutation.isPending ? 'Retrying...' : 'Retry Payment Now'}
+                </button>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setPaymentDeclinedModal(null)}
+                    className="rounded-xl border border-zinc-200 py-2 text-xs font-semibold text-zinc-600 transition hover:bg-zinc-100 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-900"
+                  >
+                    Close
+                  </button>
+                  <button
+                    type="button"
+                    disabled={cancelBookingMutation.isPending}
+                    onClick={() => cancelBookingMutation.mutate()}
+                    className="rounded-xl border border-rose-500/30 bg-rose-500/10 py-2 text-xs font-semibold text-rose-600 transition hover:bg-rose-500/20 dark:text-rose-400"
+                  >
+                    Cancel &amp; Release
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Floating Bottom-Right Toast Popup for All Alerts */}
+      {toastPopup && (
+        <div className="animate-slide-reveal fixed right-4 bottom-20 z-50 w-[calc(100vw-2rem)] max-w-sm lg:bottom-6">
+          <div
+            className={`flex items-start gap-3 rounded-2xl border p-4 shadow-2xl backdrop-blur-xl ${
+              toastPopup.type === 'success'
+                ? 'border-emerald-500/40 bg-white/95 dark:bg-[#111115]/95'
+                : toastPopup.type === 'error'
+                  ? 'border-rose-500/40 bg-white/95 dark:bg-[#111115]/95'
+                  : 'border-[#FF3366]/40 bg-white/95 dark:bg-[#111115]/95'
+            }`}
+          >
+            <div
+              className={`mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-xl ${
+                toastPopup.type === 'success'
+                  ? 'bg-emerald-500/15 text-emerald-500'
+                  : toastPopup.type === 'error'
+                    ? 'bg-rose-500/15 text-rose-500'
+                    : 'bg-[#FF3366]/15 text-[#FF3366]'
+              }`}
+            >
+              {toastPopup.type === 'success' ? (
+                <CheckCircle2 className="h-4 w-4" />
+              ) : toastPopup.type === 'error' ? (
+                <XCircle className="h-4 w-4" />
+              ) : (
+                <Sparkles className="h-4 w-4" />
+              )}
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="text-xs font-extrabold text-zinc-900 dark:text-white">
+                {toastPopup.title}
+              </div>
+              <p className="mt-0.5 text-[11px] leading-relaxed text-zinc-500 dark:text-zinc-400">
+                {toastPopup.message}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setToastPopup(null)}
+              className="rounded-lg p-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+            >
+              <X className="h-3.5 w-3.5" />
             </button>
           </div>
         </div>

@@ -35,6 +35,15 @@ public class OutboxEvent {
     @Column(name = "retry_count", nullable = false)
     private int retryCount = 0;
 
+    @Column(name = "last_error", columnDefinition = "text")
+    private String lastError;
+
+    @Column(name = "published_at")
+    private Instant publishedAt;
+
+    @Column(name = "dlq_replayed_at")
+    private Instant dlqReplayedAt;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 
@@ -56,6 +65,12 @@ public class OutboxEvent {
     public void setStatus(OutboxStatus status) { this.status = status; }
     public int getRetryCount() { return retryCount; }
     public void setRetryCount(int retryCount) { this.retryCount = retryCount; }
+    public String getLastError() { return lastError; }
+    public void setLastError(String lastError) { this.lastError = lastError; }
+    public Instant getPublishedAt() { return publishedAt; }
+    public void setPublishedAt(Instant publishedAt) { this.publishedAt = publishedAt; }
+    public Instant getDlqReplayedAt() { return dlqReplayedAt; }
+    public void setDlqReplayedAt(Instant dlqReplayedAt) { this.dlqReplayedAt = dlqReplayedAt; }
     public Instant getCreatedAt() { return createdAt; }
 }
 

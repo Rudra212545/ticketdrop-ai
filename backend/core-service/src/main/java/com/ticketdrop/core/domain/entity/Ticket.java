@@ -45,6 +45,9 @@ public class Ticket {
     @Column(name = "issued_at", nullable = false, updatable = false)
     private Instant issuedAt;
 
+    @Column(name = "used_at")
+    private Instant usedAt;
+
     @PrePersist
     void onCreate() {
         if (this.qrTokenId == null) {
@@ -71,5 +74,7 @@ public class Ticket {
     public TicketStatus getStatus() { return status; }
     public void setStatus(TicketStatus status) { this.status = status; }
     public Instant getIssuedAt() { return issuedAt; }
+    public Instant getUsedAt() { return usedAt; }
+    public void setUsedAt(Instant usedAt) { this.usedAt = usedAt; }
 }
 

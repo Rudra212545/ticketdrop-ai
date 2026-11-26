@@ -1,8 +1,11 @@
 package com.ticketdrop.core.controller;
 
 import com.ticketdrop.core.domain.enums.ApprovalStatus;
+import com.ticketdrop.core.dto.Phase3Dtos.OutboxEventResponse;
+import com.ticketdrop.core.dto.Phase3Dtos.OutboxSummaryResponse;
 import com.ticketdrop.core.dto.PlatformDtos.*;
 import com.ticketdrop.core.security.UserPrincipal;
+import com.ticketdrop.core.service.OutboxPublisher;
 import com.ticketdrop.core.service.SuperAdminService;
 import jakarta.validation.Valid;
 import org.springframework.data.domain.Page;
@@ -12,6 +15,7 @@ import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 @RestController
@@ -20,9 +24,11 @@ import java.util.UUID;
 public class SuperAdminController {
 
     private final SuperAdminService superAdminService;
+    private final OutboxPublisher outboxPublisher;
 
-    public SuperAdminController(SuperAdminService superAdminService) {
+    public SuperAdminController(SuperAdminService superAdminService, OutboxPublisher outboxPublisher) {
         this.superAdminService = superAdminService;
+        this.outboxPublisher = outboxPublisher;
     }
 
     @GetMapping("/organizers")
@@ -63,6 +69,21 @@ public class SuperAdminController {
             @RequestParam(defaultValue = "20") int size
     ) {
         return ResponseEntity.ok(superAdminService.listAuditLogs(page, size));
+    }
+
+    @GetMapping("/outbox")
+    public ResponseEntity<OutboxSummaryResponse> outboxSummary() {
+        return ResponseEntity.ok(outboxPublisher.getSummary());
+    }
+
+    @PostMapping("/outbox/{outboxId}/replay")
+    public ResponseEntity<OutboxEventResponse> replayOutboxEvent(@PathVariable UUID outboxId) {
+        return ResponseEntity.ok(outboxPublisher.replayEvent(outboxId));
+    }
+
+    @PostMapping("/outbox/replay-failed")
+    public ResponseEntity<Map<String, Integer>> replayAllFailed() {
+        return ResponseEntity.ok(Map.of("replayedCount", outboxPublisher.replayAllFailed()));
     }
 }
 

@@ -1,9 +1,12 @@
-export type EventStatus = 'DRAFT' | 'PUBLISHED' | 'SOLD_OUT' | 'CANCELLED';
+export type EventStatus = 'DRAFT' | 'PUBLISHED' | 'SOLD_OUT' | 'CANCELLED' | 'COMPLETED';
 export type SeatingMode = 'ASSIGNED_SEAT' | 'STANDING';
 export type SeatStatus = 'AVAILABLE' | 'LOCKED' | 'BOOKED' | 'RESALE_LISTED';
 export type BookingStatus = 'PENDING_PAYMENT' | 'CONFIRMED' | 'EXPIRED' | 'FAILED' | 'REFUNDED';
 export type TicketStatus = 'ACTIVE' | 'RESALE_LISTED' | 'TRANSFERRED' | 'USED' | 'REVOKED';
 export type TierColorCode = 'VIOLET' | 'EMERALD' | 'SKY' | 'CYAN' | 'FUCHSIA';
+export type WaitlistStatus = 'WAITING' | 'OFFERED' | 'CLAIMED' | 'EXPIRED' | 'CANCELLED';
+export type ResaleStatus = 'ACTIVE' | 'SOLD' | 'CANCELLED';
+export type OutboxStatus = 'PENDING' | 'PUBLISHED' | 'FAILED';
 
 export interface TierSummary {
   id: string;
@@ -101,6 +104,77 @@ export interface BookingResponse {
   expiresAt: string;
   createdAt: string;
   tickets: TicketResponse[];
+}
+
+export interface WaitlistEntryResponse {
+  id: string;
+  eventId: string;
+  eventTitle: string;
+  venueName: string;
+  city: string;
+  tierId: string;
+  tierName: string;
+  tierPricePaise: number;
+  status: WaitlistStatus;
+  offeredSeatId: string | null;
+  offeredSeatLabel: string | null;
+  offerExpiresAt: string | null;
+  queuePosition: number;
+  createdAt: string;
+}
+
+export interface ResaleListingResponse {
+  id: string;
+  ticketId: string;
+  eventId: string;
+  eventTitle: string;
+  venueName: string;
+  city: string;
+  eventStartAt: string;
+  tierName: string;
+  passLabel: string;
+  sellerId: string;
+  sellerName: string;
+  originalPricePaise: number;
+  askingPricePaise: number;
+  maxAllowedPricePaise: number;
+  status: ResaleStatus;
+  createdAt: string;
+  soldAt: string | null;
+}
+
+export interface VerifyQrResponse {
+  valid: boolean;
+  outcome: string;
+  message: string;
+  ticketId: string | null;
+  eventTitle: string | null;
+  tierName: string | null;
+  passLabel: string | null;
+  attendeeName: string | null;
+  scannedAt: string;
+}
+
+export interface OutboxEventResponse {
+  id: string;
+  aggregateType: string;
+  aggregateId: string;
+  topic: string;
+  payload: string;
+  status: OutboxStatus;
+  retryCount: number;
+  lastError: string | null;
+  createdAt: string;
+  publishedAt: string | null;
+  dlqReplayedAt: string | null;
+}
+
+export interface OutboxSummaryResponse {
+  kafkaEnabled: boolean;
+  pendingCount: number;
+  publishedCount: number;
+  failedCount: number;
+  recentEvents: OutboxEventResponse[];
 }
 
 export function formatRupees(paise: number): string {

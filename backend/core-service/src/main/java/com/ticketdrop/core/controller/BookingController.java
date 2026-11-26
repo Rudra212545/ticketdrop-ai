@@ -54,5 +54,14 @@ public class BookingController {
         UserPrincipal principal = (UserPrincipal) authentication.getPrincipal();
         return ResponseEntity.ok(bookingService.confirmPayment(bookingId, principal.id(), request));
     }
+
+    @PostMapping("/{bookingId}/cancel")
+    public ResponseEntity<BookingResponse> cancelBooking(
+            @PathVariable UUID bookingId,
+            Authentication authentication
+    ) {
+        UserPrincipal principal = (UserPrincipal) authentication.getPrincipal();
+        return ResponseEntity.ok(bookingService.cancelBooking(bookingId, principal.id()));
+    }
 }
 

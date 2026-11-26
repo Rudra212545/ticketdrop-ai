@@ -339,10 +339,12 @@ public class BookingService {
         }
 
         if (req != null && req.simulateFailure()) {
-            booking.setStatus(BookingStatus.FAILED);
-            bookingRepository.save(booking);
-            releaseSeatsAndNotify(lockedSeats, userId);
-            return toBookingResponse(booking);
+            // BookMyShow-style resilience: keep seats locked within remaining TTL so fan can retry payment!
+            throw new ApiException(
+                    HttpStatus.PAYMENT_REQUIRED,
+                    "Payment Declined",
+                    "Your payment was declined by the bank. Your seats are still safely held—retry payment before the timer expires or cancel to release them."
+            );
         }
 
         booking.setStatus(BookingStatus.CONFIRMED);
@@ -397,20 +399,12 @@ public class BookingService {
         }
 
         if (req != null && req.simulateFailure()) {
-            booking.setStatus(BookingStatus.FAILED);
-            bookingRepository.save(booking);
-            for (StandingHold h : holds) {
-                if ("HELD".equals(h.getStatus())) {
-                    h.setStatus("RELEASED");
-                    SeatTier tier = h.getTier();
-                    tier.setAvailableSeats(Math.min(tier.getTotalSeats(), tier.getAvailableSeats() + h.getQuantity()));
-                    seatTierRepository.save(tier);
-                    redisSeatLockService.releaseStandingPasses(tier.getId(), h.getQuantity());
-                }
-            }
-            standingHoldRepository.saveAll(holds);
-            seatMapBroadcaster.broadcastSeatChange(booking.getEvent().getId(), "STANDING_RELEASED");
-            return toBookingResponse(booking, List.of());
+            // Keep standing passes held within TTL so fan can retry payment
+            throw new ApiException(
+                    HttpStatus.PAYMENT_REQUIRED,
+                    "Payment Declined",
+                    "Your payment was declined by the bank. Your passes are still safely held—retry payment before the timer expires or cancel to release them."
+            );
         }
 
         booking.setStatus(BookingStatus.CONFIRMED);
@@ -440,6 +434,59 @@ public class BookingService {
 
         enqueueBookingConfirmed(booking, userId, issuedTickets.size());
         return toBookingResponse(booking, issuedTickets);
+    }
+
+    /**
+     * Explicit fan cancellation during PENDING_PAYMENT: immediately releases
+     * seats or standing holds and emits SEAT_LOCK_EXPIRED so waitlisted fans get offered.
+     */
+    @Transactional
+    public BookingResponse cancelBooking(UUID bookingId, UUID userId) {
+        Booking booking = bookingRepository.findWithEventById(bookingId)
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "Booking Not Found", "Booking does not exist."));
+        if (!booking.getUser().getId().equals(userId)) {
+            throw new ApiException(HttpStatus.FORBIDDEN, "Forbidden", "You cannot cancel another user's booking.");
+        }
+        if (booking.getStatus() != BookingStatus.PENDING_PAYMENT) {
+            return toBookingResponse(booking);
+        }
+
+        booking.setStatus(BookingStatus.FAILED);
+        bookingRepository.save(booking);
+
+        if (booking.getEvent().getSeatingMode() == SeatingMode.STANDING) {
+            List<StandingHold> holds = standingHoldRepository.findByBookingId(booking.getId());
+            for (StandingHold h : holds) {
+                if ("HELD".equals(h.getStatus())) {
+                    h.setStatus("RELEASED");
+                    SeatTier tier = h.getTier();
+                    tier.setAvailableSeats(Math.min(tier.getTotalSeats(), tier.getAvailableSeats() + h.getQuantity()));
+                    seatTierRepository.save(tier);
+                    redisSeatLockService.releaseStandingPasses(tier.getId(), h.getQuantity());
+                    outboxService.enqueue(
+                            "EVENT",
+                            booking.getEvent().getId(),
+                            KafkaTopics.SEAT_LOCK_EXPIRED,
+                            "SEAT_LOCK_EXPIRED",
+                            Map.of(
+                                    "eventId", booking.getEvent().getId(),
+                                    "tierId", tier.getId(),
+                                    "releasedQuantity", h.getQuantity()
+                            )
+                    );
+                }
+            }
+            standingHoldRepository.saveAll(holds);
+            seatMapBroadcaster.broadcastSeatChange(booking.getEvent().getId(), "STANDING_RELEASED");
+        } else {
+            List<Seat> lockedSeats = seatRepository.findByEventIdAndLockedByAndStatus(
+                    booking.getEvent().getId(), userId, SeatStatus.LOCKED
+            );
+            if (!lockedSeats.isEmpty()) {
+                releaseSeatsAndNotify(lockedSeats, userId);
+            }
+        }
+        return toBookingResponse(booking, List.of());
     }
 
     private void enqueueBookingConfirmed(Booking booking, UUID userId, int count) {
@@ -505,6 +552,17 @@ public class BookingService {
                 tier.setAvailableSeats(Math.min(tier.getTotalSeats(), tier.getAvailableSeats() + hold.getQuantity()));
                 seatTierRepository.save(tier);
                 redisSeatLockService.releaseStandingPasses(tier.getId(), hold.getQuantity());
+                outboxService.enqueue(
+                        "EVENT",
+                        hold.getEvent().getId(),
+                        KafkaTopics.SEAT_LOCK_EXPIRED,
+                        "SEAT_LOCK_EXPIRED",
+                        Map.of(
+                                "eventId", hold.getEvent().getId(),
+                                "tierId", tier.getId(),
+                                "releasedQuantity", hold.getQuantity()
+                        )
+                );
                 touchedEvents.add(hold.getEvent().getId());
             }
             standingHoldRepository.saveAll(expiredHolds);

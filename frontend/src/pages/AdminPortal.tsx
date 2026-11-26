@@ -29,9 +29,15 @@ import {
   Search,
 } from 'lucide-react';
 import DashboardLayout, { type SidebarNavItem } from '../components/DashboardLayout';
+import VenueQrScanner from '../components/VenueQrScanner';
 import { apiClient } from '../lib/api';
 import type { OrganizerSummary } from '../types/auth';
-import { formatRupees, type EventSummary, type SeatingMode, type TierColorCode } from '../types/event';
+import {
+  formatRupees,
+  type EventSummary,
+  type SeatingMode,
+  type TierColorCode,
+} from '../types/event';
 
 interface TierDraft {
   name: string;
@@ -52,7 +58,7 @@ const COLOR_SWATCHES: { code: TierColorCode; bg: string; label: string }[] = [
 ];
 
 export default function AdminPortal() {
-  const [activeNav, setActiveNav] = useState<'overview' | 'events'>('overview');
+  const [activeNav, setActiveNav] = useState<'overview' | 'events' | 'scanner'>('overview');
   const [showBuilder, setShowBuilder] = useState(false);
   const [editingEvent, setEditingEvent] = useState<EventSummary | null>(null);
   const [editTitle, setEditTitle] = useState('');
@@ -65,20 +71,28 @@ export default function AdminPortal() {
   const [editFlashSale, setEditFlashSale] = useState(true);
   const [editResale, setEditResale] = useState(true);
   const [editResaleCap, setEditResaleCap] = useState('1.10');
-  const [toast, setToast] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [statusFilter, setStatusFilter] = useState<'ALL' | 'PUBLISHED' | 'DRAFT'>('ALL');
+  const [editModalError, setEditModalError] = useState<string | null>(null);
+  const [statusFilter, setStatusFilter] = useState<'ALL' | 'PUBLISHED' | 'DRAFT' | 'COMPLETED' | 'CANCELLED'>('ALL');
   const [eventSearch, setEventSearch] = useState('');
+  const [lifecycleConfirm, setLifecycleConfirm] = useState<{
+    action: 'DELETE' | 'CANCEL' | 'COMPLETE';
+    event: EventSummary;
+  } | null>(null);
   const queryClient = useQueryClient();
 
   useEffect(() => {
-    if (!editingEvent) return;
+    if (!editingEvent && !lifecycleConfirm) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setEditingEvent(null);
+      if (e.key === 'Escape') {
+        setEditingEvent(null);
+        setLifecycleConfirm(null);
+      }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [editingEvent]);
+  }, [editingEvent, lifecycleConfirm]);
 
   // Event Builder form state
   const [title, setTitle] = useState('');
@@ -106,10 +120,13 @@ export default function AdminPortal() {
     setEventTime(timeStr);
   };
 
-  const showNotice = (msg: string) => {
-    setToast(msg);
-    setTimeout(() => setToast(null), 4000);
+  const showNotice = (msg: string, type: 'success' | 'error' = 'success') => {
+    setToast({ type, text: msg });
+    setTimeout(() => setToast(null), 4500);
   };
+
+  const extractErr = (err: unknown, fallback: string) =>
+    (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail || fallback;
 
   const { data: profile, isLoading, error } = useQuery({
     queryKey: ['admin-profile'],
@@ -172,6 +189,36 @@ export default function AdminPortal() {
       queryClient.invalidateQueries({ queryKey: ['admin-events'] });
       showNotice(`"${ev.title}" is now PUBLISHED and live for fans!`);
     },
+    onError: (err: unknown) => showNotice(extractErr(err, 'Could not publish event.'), 'error'),
+  });
+
+  const deleteEventMutation = useMutation({
+    mutationFn: async (eventId: string) => apiClient.delete(`/admin/events/${eventId}`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['admin-events'] });
+      showNotice('Event deleted cleanly.');
+    },
+    onError: (err: unknown) => showNotice(extractErr(err, 'Could not delete event.'), 'error'),
+  });
+
+  const cancelEventMutation = useMutation({
+    mutationFn: async (eventId: string) =>
+      (await apiClient.patch<EventSummary>(`/admin/events/${eventId}/cancel`)).data,
+    onSuccess: (ev) => {
+      queryClient.invalidateQueries({ queryKey: ['admin-events'] });
+      showNotice(`"${ev.title}" cancelled. Active passes revoked & bookings marked refunded.`);
+    },
+    onError: (err: unknown) => showNotice(extractErr(err, 'Could not cancel event.'), 'error'),
+  });
+
+  const completeEventMutation = useMutation({
+    mutationFn: async (eventId: string) =>
+      (await apiClient.patch<EventSummary>(`/admin/events/${eventId}/complete`)).data,
+    onSuccess: (ev) => {
+      queryClient.invalidateQueries({ queryKey: ['admin-events'] });
+      showNotice(`"${ev.title}" marked as COMPLETED.`);
+    },
+    onError: (err: unknown) => showNotice(extractErr(err, 'Could not mark event as completed.'), 'error'),
   });
 
   const updateEventMutation = useMutation({
@@ -194,13 +241,11 @@ export default function AdminPortal() {
     onSuccess: (ev) => {
       queryClient.invalidateQueries({ queryKey: ['admin-events'] });
       setEditingEvent(null);
+      setEditModalError(null);
       showNotice(`Updated "${ev.title}" cleanly (logged to Audit Trail).`);
     },
     onError: (err: unknown) => {
-      const msg =
-        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
-        'Could not update event.';
-      setErrorMsg(msg);
+      setEditModalError(extractErr(err, 'Could not update event. Check all fields.'));
     },
   });
 
@@ -217,7 +262,7 @@ export default function AdminPortal() {
     setEditFlashSale(ev.flashSaleEnabled);
     setEditResale(ev.resaleEnabled);
     setEditResaleCap(String(ev.maxResaleMultiplier));
-    setErrorMsg(null);
+    setEditModalError(null);
     setEditingEvent(ev);
   };
 
@@ -254,8 +299,8 @@ export default function AdminPortal() {
   const navItems: SidebarNavItem[] = [
     { id: 'overview', label: 'Studio Overview', icon: LayoutDashboard },
     { id: 'events', label: 'Events & Seat Maps', icon: CalendarPlus, badge: events.length },
+    { id: 'scanner', label: 'Venue QR Scanner', icon: QrCode },
     { id: 'ai-pricing', label: 'AI Pricing Co-Pilot', icon: Sparkles, badge: 'Phase 4', disabled: true },
-    { id: 'scanner', label: 'Venue QR Scanner', icon: QrCode, badge: 'Phase 3', disabled: true },
   ];
 
   const handleCreateSubmit = (e: FormEvent) => {
@@ -276,20 +321,41 @@ export default function AdminPortal() {
       pageSubtitle="Create flash-sale drops, manage seat maps, and optimize pricing with AI Co-Pilot"
       navItems={navItems}
       activeNav={activeNav}
-      onSelectNav={(id) => setActiveNav(id as 'overview' | 'events')}
+      onSelectNav={(id) => setActiveNav(id as 'overview' | 'events' | 'scanner')}
     >
       {toast && (
-        <div className="animate-slide-reveal mb-5 flex items-center justify-between gap-3 rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-xs font-semibold text-emerald-700 shadow-sm dark:text-emerald-300">
-          <span className="inline-flex items-center gap-2">
-            <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-500" /> {toast}
-          </span>
-          <button
-            type="button"
-            onClick={() => setToast(null)}
-            className="rounded-md p-0.5 text-emerald-600/70 hover:text-emerald-600 dark:text-emerald-300/70"
+        <div className="animate-slide-reveal fixed right-4 bottom-6 z-50 w-[calc(100vw-2rem)] max-w-sm">
+          <div
+            className={`flex items-start gap-3 rounded-2xl border p-4 shadow-2xl backdrop-blur-xl ${
+              toast.type === 'error'
+                ? 'border-rose-500/40 bg-white/95 dark:bg-[#111115]/95'
+                : 'border-emerald-500/40 bg-white/95 dark:bg-[#111115]/95'
+            }`}
           >
-            <X className="h-3.5 w-3.5" />
-          </button>
+            <div
+              className={`mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-xl ${
+                toast.type === 'error'
+                  ? 'bg-rose-500/15 text-rose-500'
+                  : 'bg-emerald-500/15 text-emerald-500'
+              }`}
+            >
+              {toast.type === 'error' ? (
+                <AlertTriangle className="h-4 w-4" />
+              ) : (
+                <CheckCircle2 className="h-4 w-4" />
+              )}
+            </div>
+            <div className="min-w-0 flex-1 text-xs font-semibold text-zinc-900 dark:text-white">
+              {toast.text}
+            </div>
+            <button
+              type="button"
+              onClick={() => setToast(null)}
+              className="rounded-lg p-1 text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
         </div>
       )}
 
@@ -542,7 +608,11 @@ export default function AdminPortal() {
                                     className={`inline-flex items-center gap-1.5 rounded px-2 py-0.5 font-mono text-[10px] font-bold ${
                                       ev.status === 'PUBLISHED'
                                         ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
-                                        : 'bg-amber-500/15 text-amber-600 dark:text-amber-400'
+                                        : ev.status === 'COMPLETED'
+                                          ? 'bg-sky-500/15 text-sky-600 dark:text-sky-400'
+                                          : ev.status === 'CANCELLED'
+                                            ? 'bg-rose-500/15 text-rose-600 dark:text-rose-400'
+                                            : 'bg-amber-500/15 text-amber-600 dark:text-amber-400'
                                     }`}
                                   >
                                     {ev.status === 'PUBLISHED' && (
@@ -563,14 +633,16 @@ export default function AdminPortal() {
                               </div>
 
                               <div className="flex shrink-0 items-center gap-2">
-                                <button
-                                  type="button"
-                                  onClick={() => openEditModal(ev)}
-                                  title="Edit Event"
-                                  className="flex h-7 w-7 items-center justify-center rounded-lg border border-zinc-200 bg-white text-zinc-500 transition hover:border-[#FF3366]/50 hover:text-[#FF3366] dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400"
-                                >
-                                  <Pencil className="h-3.5 w-3.5" />
-                                </button>
+                                {ev.status !== 'COMPLETED' && ev.status !== 'CANCELLED' && (
+                                  <button
+                                    type="button"
+                                    onClick={() => openEditModal(ev)}
+                                    title="Edit Event"
+                                    className="flex h-7 w-7 items-center justify-center rounded-lg border border-zinc-200 bg-white text-zinc-500 transition hover:border-[#FF3366]/50 hover:text-[#FF3366] dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400"
+                                  >
+                                    <Pencil className="h-3.5 w-3.5" />
+                                  </button>
+                                )}
                                 {ev.status === 'DRAFT' ? (
                                   <button
                                     disabled={publishMutation.isPending}
@@ -1244,13 +1316,13 @@ export default function AdminPortal() {
                     )}
                   </div>
 
-                  <div className="flex items-center gap-1.5">
-                    {(['ALL', 'PUBLISHED', 'DRAFT'] as const).map((st) => (
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {(['ALL', 'PUBLISHED', 'DRAFT', 'COMPLETED', 'CANCELLED'] as const).map((st) => (
                       <button
                         key={st}
                         type="button"
                         onClick={() => setStatusFilter(st)}
-                        className={`rounded-lg px-3 py-1.5 font-mono text-[11px] font-bold transition-all active:scale-95 ${
+                        className={`rounded-lg px-2.5 py-1.5 font-mono text-[10px] font-bold transition-all active:scale-95 sm:px-3 sm:text-[11px] ${
                           statusFilter === st
                             ? 'bg-[#FF3366] text-white shadow-sm shadow-[#FF3366]/30'
                             : 'border border-zinc-200 bg-white text-zinc-600 hover:border-[#FF3366]/40 dark:border-zinc-800 dark:bg-[#111114] dark:text-zinc-400'
@@ -1290,7 +1362,11 @@ export default function AdminPortal() {
                             className={`inline-flex items-center gap-1.5 rounded-md px-2 py-0.5 font-mono text-[10px] font-bold ${
                               ev.status === 'PUBLISHED'
                                 ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
-                                : 'bg-amber-500/15 text-amber-600 dark:text-amber-400'
+                                : ev.status === 'COMPLETED'
+                                  ? 'bg-sky-500/15 text-sky-600 dark:text-sky-400'
+                                  : ev.status === 'CANCELLED'
+                                    ? 'bg-rose-500/15 text-rose-600 dark:text-rose-400'
+                                    : 'bg-amber-500/15 text-amber-600 dark:text-amber-400'
                             }`}
                           >
                             {ev.status === 'PUBLISHED' && (
@@ -1340,21 +1416,60 @@ export default function AdminPortal() {
                         </div>
                       </div>
 
-                      <div className="flex items-center gap-2">
-                        <button
-                          onClick={() => openEditModal(ev)}
-                          className="inline-flex items-center gap-1.5 rounded-xl border border-zinc-200 bg-zinc-50 px-3.5 py-2 text-xs font-semibold text-zinc-700 transition hover:-translate-y-0.5 hover:border-[#FF3366]/50 hover:text-[#FF3366] active:scale-95 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300"
-                        >
-                          <Pencil className="h-3.5 w-3.5" /> Edit
-                        </button>
-                        {ev.status === 'DRAFT' && (
+                      <div className="flex flex-wrap items-center gap-2">
+                        {ev.status !== 'CANCELLED' && ev.status !== 'COMPLETED' && (
                           <button
-                            disabled={publishMutation.isPending}
-                            onClick={() => publishMutation.mutate(ev.id)}
-                            className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 px-4 py-2 text-xs font-bold text-white shadow-sm shadow-emerald-600/25 transition hover:-translate-y-0.5 hover:bg-emerald-500 active:scale-95 disabled:opacity-50"
+                            onClick={() => openEditModal(ev)}
+                            className="inline-flex items-center gap-1.5 rounded-xl border border-zinc-200 bg-zinc-50 px-3.5 py-2 text-xs font-semibold text-zinc-700 transition hover:-translate-y-0.5 hover:border-[#FF3366]/50 hover:text-[#FF3366] active:scale-95 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300"
                           >
-                            <Rocket className="h-3.5 w-3.5" /> Publish Live
+                            <Pencil className="h-3.5 w-3.5" /> Edit
                           </button>
+                        )}
+                        {ev.status === 'DRAFT' && (
+                          <>
+                            <button
+                              disabled={publishMutation.isPending}
+                              onClick={() => publishMutation.mutate(ev.id)}
+                              className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 px-4 py-2 text-xs font-bold text-white shadow-sm shadow-emerald-600/25 transition hover:-translate-y-0.5 hover:bg-emerald-500 active:scale-95 disabled:opacity-50"
+                            >
+                              <Rocket className="h-3.5 w-3.5" /> Publish Live
+                            </button>
+                            <button
+                              disabled={deleteEventMutation.isPending}
+                              onClick={() => setLifecycleConfirm({ action: 'DELETE', event: ev })}
+                              className="inline-flex items-center gap-1 rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs font-semibold text-rose-600 transition hover:bg-rose-500/20 dark:text-rose-400"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" /> Delete
+                            </button>
+                          </>
+                        )}
+                        {(ev.status === 'PUBLISHED' || ev.status === 'SOLD_OUT') && (
+                          <>
+                            <button
+                              disabled={completeEventMutation.isPending}
+                              onClick={() => setLifecycleConfirm({ action: 'COMPLETE', event: ev })}
+                              className="inline-flex items-center gap-1 rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs font-semibold text-zinc-700 transition hover:border-sky-500/50 hover:text-sky-600 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300"
+                            >
+                              <CheckCircle2 className="h-3.5 w-3.5" /> Complete
+                            </button>
+                            {sold === 0 ? (
+                              <button
+                                disabled={deleteEventMutation.isPending}
+                                onClick={() => setLifecycleConfirm({ action: 'DELETE', event: ev })}
+                                className="inline-flex items-center gap-1 rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs font-semibold text-rose-600 transition hover:bg-rose-500/20 dark:text-rose-400"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" /> Delete
+                              </button>
+                            ) : (
+                              <button
+                                disabled={cancelEventMutation.isPending}
+                                onClick={() => setLifecycleConfirm({ action: 'CANCEL', event: ev })}
+                                className="inline-flex items-center gap-1 rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs font-semibold text-rose-600 transition hover:bg-rose-500/20 dark:text-rose-400"
+                              >
+                                <AlertTriangle className="h-3.5 w-3.5" /> Cancel Event
+                              </button>
+                            )}
+                          </>
                         )}
                       </div>
                     </div>
@@ -1362,6 +1477,14 @@ export default function AdminPortal() {
                 })}
               </div>
             </div>
+          )}
+
+          {/* Venue Gate QR Scanner Tab */}
+          {activeNav === 'scanner' && (
+            <VenueQrScanner
+              events={events}
+              onErrorNotice={(msg) => showNotice(msg, 'error')}
+            />
           )}
         </>
       )}
@@ -1396,10 +1519,16 @@ export default function AdminPortal() {
             <form
               onSubmit={(e) => {
                 e.preventDefault();
+                setEditModalError(null);
                 updateEventMutation.mutate();
               }}
               className="mt-5 space-y-4"
             >
+              {editModalError && (
+                <div className="animate-slide-reveal rounded-xl border border-rose-500/40 bg-rose-500/15 px-3.5 py-2.5 text-xs font-semibold text-rose-600 dark:text-rose-300">
+                  {editModalError}
+                </div>
+              )}
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="sm:col-span-2">
                   <label className="mb-1 block text-xs font-semibold text-zinc-700 dark:text-zinc-300">
@@ -1551,6 +1680,121 @@ export default function AdminPortal() {
           </div>
         </div>
       )}
+
+      {/* Custom Event Lifecycle Confirmation Modal (Delete / Cancel / Complete) */}
+      {lifecycleConfirm && (() => {
+        const { action, event } = lifecycleConfirm;
+        const soldCount = event.totalSeats - event.availableSeats;
+        const isPending =
+          deleteEventMutation.isPending ||
+          cancelEventMutation.isPending ||
+          completeEventMutation.isPending;
+
+        const handleConfirm = () => {
+          if (action === 'DELETE') {
+            deleteEventMutation.mutate(event.id, { onSettled: () => setLifecycleConfirm(null) });
+          } else if (action === 'CANCEL') {
+            cancelEventMutation.mutate(event.id, { onSettled: () => setLifecycleConfirm(null) });
+          } else {
+            completeEventMutation.mutate(event.id, { onSettled: () => setLifecycleConfirm(null) });
+          }
+        };
+
+        return (
+          <div
+            onClick={() => setLifecycleConfirm(null)}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-md"
+          >
+            <div
+              onClick={(e) => e.stopPropagation()}
+              className="animate-modal-pop w-full max-w-md overflow-hidden rounded-3xl border border-zinc-200 bg-white p-6 shadow-2xl dark:border-zinc-800 dark:bg-[#111115]"
+            >
+              <div className="flex items-start gap-3">
+                <div
+                  className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl ${
+                    action === 'COMPLETE'
+                      ? 'bg-sky-500/15 text-sky-500'
+                      : 'bg-rose-500/15 text-rose-500'
+                  }`}
+                >
+                  {action === 'COMPLETE' ? (
+                    <CheckCircle2 className="h-5 w-5" />
+                  ) : action === 'DELETE' ? (
+                    <Trash2 className="h-5 w-5" />
+                  ) : (
+                    <AlertTriangle className="h-5 w-5" />
+                  )}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <h3 className="text-base font-extrabold text-zinc-900 dark:text-white">
+                    {action === 'DELETE'
+                      ? 'Delete Event Permanently?'
+                      : action === 'CANCEL'
+                        ? 'Cancel Live Event?'
+                        : 'Mark Event as Completed?'}
+                  </h3>
+                  <p className="mt-1 text-xs font-semibold text-zinc-700 dark:text-zinc-300">
+                    {event.title}
+                  </p>
+                </div>
+              </div>
+
+              <div
+                className={`mt-4 rounded-xl border p-3.5 text-xs leading-relaxed ${
+                  action === 'COMPLETE'
+                    ? 'border-sky-500/30 bg-sky-500/10 text-sky-700 dark:text-sky-300'
+                    : 'border-rose-500/30 bg-rose-500/10 text-rose-700 dark:text-rose-300'
+                }`}
+              >
+                {action === 'DELETE' && (
+                  <>
+                    <strong>0 tickets sold.</strong> Deleting will permanently remove this event and its generated seat map. This cannot be undone.
+                  </>
+                )}
+                {action === 'CANCEL' && (
+                  <>
+                    <strong>{soldCount} sold pass{soldCount === 1 ? '' : 'es'} affected.</strong> Cancelling hides this event from fans, immediately revokes all active QR passes, cancels open resale listings, marks confirmed bookings as <strong>REFUNDED</strong>, and emits an <code>event.cancelled</code> outbox event.
+                  </>
+                )}
+                {action === 'COMPLETE' && (
+                  <>
+                    Marking as <strong>COMPLETED</strong> removes this event from Live Drops, closes new bookings &amp; resale, and preserves your revenue and attendance analytics.
+                  </>
+                )}
+              </div>
+
+              <div className="mt-5 flex justify-end gap-2.5">
+                <button
+                  type="button"
+                  disabled={isPending}
+                  onClick={() => setLifecycleConfirm(null)}
+                  className="rounded-xl border border-zinc-200 px-4 py-2 text-xs font-semibold text-zinc-600 transition hover:bg-zinc-100 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-900"
+                >
+                  Keep Event
+                </button>
+                <button
+                  type="button"
+                  disabled={isPending}
+                  onClick={handleConfirm}
+                  className={`rounded-xl px-4 py-2 text-xs font-bold text-white shadow-md transition disabled:opacity-50 ${
+                    action === 'COMPLETE'
+                      ? 'bg-sky-600 hover:bg-sky-500'
+                      : 'bg-rose-600 hover:bg-rose-500'
+                  }`}
+                >
+                  {isPending
+                    ? 'Processing...'
+                    : action === 'DELETE'
+                      ? 'Delete Permanently'
+                      : action === 'CANCEL'
+                        ? 'Confirm Cancel & Refund'
+                        : 'Mark Completed'}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </DashboardLayout>
   );
 }

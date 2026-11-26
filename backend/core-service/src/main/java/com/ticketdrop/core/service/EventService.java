@@ -1,26 +1,22 @@
 package com.ticketdrop.core.service;
 
 import com.ticketdrop.core.audit.Audited;
-import com.ticketdrop.core.domain.entity.Event;
-import com.ticketdrop.core.domain.entity.OrganizerProfile;
-import com.ticketdrop.core.domain.entity.Seat;
-import com.ticketdrop.core.domain.entity.SeatTier;
-import com.ticketdrop.core.domain.enums.ApprovalStatus;
-import com.ticketdrop.core.domain.enums.EventStatus;
-import com.ticketdrop.core.domain.enums.SeatStatus;
-import com.ticketdrop.core.domain.enums.SeatingMode;
+import com.ticketdrop.core.domain.entity.*;
+import com.ticketdrop.core.domain.enums.*;
 import com.ticketdrop.core.dto.EventDtos.*;
 import com.ticketdrop.core.exception.ApiException;
-import com.ticketdrop.core.repository.EventRepository;
-import com.ticketdrop.core.repository.OrganizerProfileRepository;
-import com.ticketdrop.core.repository.SeatRepository;
-import com.ticketdrop.core.repository.SeatTierRepository;
+import com.ticketdrop.core.repository.*;
 import com.ticketdrop.events.KafkaTopics;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.HttpStatus;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -30,27 +26,41 @@ import java.util.UUID;
 @Service
 public class EventService {
 
+    private static final Logger log = LoggerFactory.getLogger(EventService.class);
+
     private final EventRepository eventRepository;
     private final SeatTierRepository seatTierRepository;
     private final SeatRepository seatRepository;
     private final OrganizerProfileRepository organizerProfileRepository;
+    private final BookingRepository bookingRepository;
+    private final TicketRepository ticketRepository;
+    private final ResaleListingRepository resaleListingRepository;
     private final OutboxService outboxService;
     private final RedisSeatLockService redisSeatLockService;
+    private final StringRedisTemplate redisTemplate;
 
     public EventService(
             EventRepository eventRepository,
             SeatTierRepository seatTierRepository,
             SeatRepository seatRepository,
             OrganizerProfileRepository organizerProfileRepository,
+            BookingRepository bookingRepository,
+            TicketRepository ticketRepository,
+            ResaleListingRepository resaleListingRepository,
             OutboxService outboxService,
-            RedisSeatLockService redisSeatLockService
+            RedisSeatLockService redisSeatLockService,
+            StringRedisTemplate redisTemplate
     ) {
         this.eventRepository = eventRepository;
         this.seatTierRepository = seatTierRepository;
         this.seatRepository = seatRepository;
         this.organizerProfileRepository = organizerProfileRepository;
+        this.bookingRepository = bookingRepository;
+        this.ticketRepository = ticketRepository;
+        this.resaleListingRepository = resaleListingRepository;
         this.outboxService = outboxService;
         this.redisSeatLockService = redisSeatLockService;
+        this.redisTemplate = redisTemplate;
     }
 
     @Transactional
@@ -145,6 +155,9 @@ public class EventService {
         if (!event.getOrganizer().getId().equals(organizer.getId())) {
             throw new ApiException(HttpStatus.FORBIDDEN, "Not Event Owner", "You can only edit your own events.");
         }
+        if (event.getStatus() == EventStatus.COMPLETED || event.getStatus() == EventStatus.CANCELLED) {
+            throw new ApiException(HttpStatus.CONFLICT, "Event Locked", "Completed or cancelled events cannot be edited.");
+        }
         if (event.getStatus() == EventStatus.CANCELLED) {
             throw new ApiException(HttpStatus.CONFLICT, "Event Cancelled", "Cancelled events cannot be edited.");
         }
@@ -198,6 +211,148 @@ public class EventService {
                 )
         );
         return toEventSummary(event);
+    }
+
+    /**
+     * Hard-delete is ONLY permitted for DRAFT events or events with 0 bookings/tickets.
+     * Live events with sold tickets must be CANCELLED to preserve financial & audit history.
+     */
+    @Transactional
+    @Audited(action = "EVENT_DELETED", resourceType = "EVENT")
+    public void deleteEvent(UUID eventId, UUID organizerUserId) {
+        OrganizerProfile organizer = requireApprovedOrganizer(organizerUserId);
+        Event event = eventRepository.findWithOrganizerById(eventId)
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "Event Not Found", "Event does not exist."));
+        if (!event.getOrganizer().getId().equals(organizer.getId())) {
+            throw new ApiException(HttpStatus.FORBIDDEN, "Not Event Owner", "You can only delete your own events.");
+        }
+        long bookingsCount = bookingRepository.countByEventId(eventId);
+        long ticketsCount = ticketRepository.countByBookingEventId(eventId);
+        if (bookingsCount > 0 || ticketsCount > 0) {
+            throw new ApiException(
+                    HttpStatus.CONFLICT,
+                    "Cannot Delete Event With Bookings",
+                    "This event already has fan bookings. Use Cancel Event instead so passes are revoked and refunded cleanly."
+            );
+        }
+        eventRepository.delete(event);
+    }
+
+    /**
+     * Cancels a live event: transitions status -> CANCELLED, marks confirmed bookings REFUNDED,
+     * revokes active QR passes (and caches revocation in Redis), cancels open resale listings,
+     * and enqueues event.cancelled in the Outbox.
+     */
+    @Transactional
+    @Audited(action = "EVENT_CANCELLED", resourceType = "EVENT")
+    public EventSummary cancelEvent(UUID eventId, UUID organizerUserId) {
+        OrganizerProfile organizer = requireApprovedOrganizer(organizerUserId);
+        Event event = eventRepository.findWithOrganizerById(eventId)
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "Event Not Found", "Event does not exist."));
+        if (!event.getOrganizer().getId().equals(organizer.getId())) {
+            throw new ApiException(HttpStatus.FORBIDDEN, "Not Event Owner", "You can only cancel your own events.");
+        }
+        if (event.getStatus() == EventStatus.CANCELLED) {
+            return toEventSummary(event);
+        }
+        if (event.getStatus() == EventStatus.COMPLETED) {
+            throw new ApiException(HttpStatus.CONFLICT, "Already Completed", "Completed events cannot be cancelled.");
+        }
+
+        event.setStatus(EventStatus.CANCELLED);
+        event = eventRepository.save(event);
+
+        List<Booking> bookings = bookingRepository.findByEventIdAndStatusIn(
+                eventId, List.of(BookingStatus.CONFIRMED, BookingStatus.PENDING_PAYMENT)
+        );
+        int refundedCount = 0;
+        for (Booking b : bookings) {
+            if (b.getStatus() == BookingStatus.CONFIRMED) {
+                b.setStatus(BookingStatus.REFUNDED);
+                refundedCount++;
+            } else {
+                b.setStatus(BookingStatus.EXPIRED);
+            }
+        }
+        bookingRepository.saveAll(bookings);
+
+        List<Ticket> activeTickets = ticketRepository.findByBookingEventIdAndStatusIn(
+                eventId, List.of(TicketStatus.ACTIVE, TicketStatus.RESALE_LISTED)
+        );
+        for (Ticket t : activeTickets) {
+            t.setStatus(TicketStatus.REVOKED);
+            redisTemplate.opsForValue().set("qr:revoked:" + t.getQrTokenId(), "EVENT_CANCELLED", Duration.ofDays(30));
+        }
+        ticketRepository.saveAll(activeTickets);
+
+        List<ResaleListing> openListings = resaleListingRepository.findByEventIdAndStatusOrderByAskingPricePaiseAsc(
+                eventId, ResaleStatus.ACTIVE
+        );
+        for (ResaleListing rl : openListings) {
+            rl.setStatus(ResaleStatus.CANCELLED);
+        }
+        resaleListingRepository.saveAll(openListings);
+
+        outboxService.enqueue(
+                "EVENT",
+                event.getId(),
+                KafkaTopics.EVENT_CANCELLED,
+                "EVENT_CANCELLED",
+                Map.of(
+                        "eventId", event.getId(),
+                        "title", event.getTitle(),
+                        "refundedBookings", refundedCount,
+                        "revokedTickets", activeTickets.size()
+                )
+        );
+        return toEventSummary(event);
+    }
+
+    @Transactional
+    @Audited(action = "EVENT_COMPLETED", resourceType = "EVENT")
+    public EventSummary completeEvent(UUID eventId, UUID organizerUserId) {
+        OrganizerProfile organizer = requireApprovedOrganizer(organizerUserId);
+        Event event = eventRepository.findWithOrganizerById(eventId)
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "Event Not Found", "Event does not exist."));
+        if (!event.getOrganizer().getId().equals(organizer.getId())) {
+            throw new ApiException(HttpStatus.FORBIDDEN, "Not Event Owner", "You can only complete your own events.");
+        }
+        event.setStatus(EventStatus.COMPLETED);
+        event = eventRepository.save(event);
+
+        List<ResaleListing> openListings = resaleListingRepository.findByEventIdAndStatusOrderByAskingPricePaiseAsc(
+                eventId, ResaleStatus.ACTIVE
+        );
+        for (ResaleListing rl : openListings) {
+            rl.setStatus(ResaleStatus.CANCELLED);
+        }
+        resaleListingRepository.saveAll(openListings);
+        return toEventSummary(event);
+    }
+
+    /**
+     * Automatically marks PUBLISHED / SOLD_OUT events as COMPLETED 4 hours after eventStartAt.
+     */
+    @Scheduled(fixedDelay = 900_000)
+    @Transactional
+    public void autoCompletePastEvents() {
+        Instant cutoff = Instant.now().minus(Duration.ofHours(4));
+        List<Event> past = eventRepository.findByStatusInAndEventStartAtBefore(
+                List.of(EventStatus.PUBLISHED, EventStatus.SOLD_OUT), cutoff
+        );
+        if (past.isEmpty()) return;
+        for (Event ev : past) {
+            ev.setStatus(EventStatus.COMPLETED);
+            List<ResaleListing> openListings = resaleListingRepository.findByEventIdAndStatusOrderByAskingPricePaiseAsc(
+                    ev.getId(), ResaleStatus.ACTIVE
+            );
+            for (ResaleListing rl : openListings) {
+                rl.setStatus(ResaleStatus.CANCELLED);
+            }
+            resaleListingRepository.saveAll(openListings);
+        }
+        eventRepository.saveAll(past);
+        log.info("Auto-completed {} past events", past.size());
     }
 
     @Transactional(readOnly = true)

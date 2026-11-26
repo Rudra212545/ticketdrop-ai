@@ -7,6 +7,7 @@ public final class KafkaTopics {
     private KafkaTopics() {}
 
     public static final String EVENT_PUBLISHED = "event.published";
+    public static final String EVENT_CANCELLED = "event.cancelled";
     public static final String SEAT_LOCK_EXPIRED = "seat.lock.expired";
     public static final String BOOKING_CONFIRMED = "booking.confirmed";
     public static final String RESALE_COMPLETED = "resale.completed";
