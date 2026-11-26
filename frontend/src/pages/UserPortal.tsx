@@ -348,11 +348,15 @@ export default function UserPortal() {
               {theme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
             </button>
 
-            <div className="hidden items-center gap-2.5 rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-1.5 sm:flex dark:border-zinc-800 dark:bg-zinc-900/70">
+            <Link
+              to="/settings"
+              title="Account Settings (Edit Profile, Password, Delete Account)"
+              className="flex items-center gap-2.5 rounded-xl border border-zinc-200 bg-zinc-50 px-2.5 py-1.5 transition hover:border-[#FF3366]/50 sm:px-3 dark:border-zinc-800 dark:bg-zinc-900/70"
+            >
               <div className="flex h-6 w-6 items-center justify-center rounded-full bg-[#FF3366]/15 font-mono text-[11px] font-bold text-[#FF3366]">
                 {user?.fullName?.charAt(0).toUpperCase() ?? 'F'}
               </div>
-              <div className="text-left leading-tight">
+              <div className="hidden text-left leading-tight sm:block">
                 <div className="max-w-[130px] truncate text-xs font-bold text-zinc-900 dark:text-white">
                   {user?.fullName}
                 </div>
@@ -360,7 +364,7 @@ export default function UserPortal() {
                   {user?.email}
                 </div>
               </div>
-            </div>
+            </Link>
 
             <button
               onClick={logout}

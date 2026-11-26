@@ -9,7 +9,21 @@ import UserPortal from './pages/UserPortal';
 import EventBookingPage from './pages/EventBookingPage';
 import AdminPortal from './pages/AdminPortal';
 import SuperAdminPortal from './pages/SuperAdminPortal';
+import AccountSettingsPage from './pages/AccountSettingsPage';
 import type { Role } from './types/auth';
+
+function RequireAuth({ children }: { children: React.ReactNode }) {
+  const { user, loading } = useAuth();
+  if (loading) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-zinc-50 text-sm text-zinc-500 dark:bg-[#09090B]">
+        Loading session...
+      </div>
+    );
+  }
+  if (!user) return <Navigate to="/login" replace />;
+  return <>{children}</>;
+}
 
 function RequireRole({ role, children }: { role: Role; children: React.ReactNode }) {
   const { user, loading } = useAuth();
@@ -71,6 +85,14 @@ export default function App() {
               <RequireRole role="SUPER_ADMIN">
                 <SuperAdminPortal />
               </RequireRole>
+            }
+          />
+          <Route
+            path="/settings"
+            element={
+              <RequireAuth>
+                <AccountSettingsPage />
+              </RequireAuth>
             }
           />
           <Route path="*" element={<Navigate to="/" replace />} />

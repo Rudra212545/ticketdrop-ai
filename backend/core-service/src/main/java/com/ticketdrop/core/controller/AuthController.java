@@ -49,5 +49,36 @@ public class AuthController {
         UserPrincipal principal = (UserPrincipal) authentication.getPrincipal();
         return ResponseEntity.ok(authService.getCurrentUser(principal));
     }
+
+    @PatchMapping("/me")
+    public ResponseEntity<UserSummary> updateProfile(
+            @Valid @RequestBody UpdateProfileRequest request,
+            Authentication authentication
+    ) {
+        UserPrincipal principal = (UserPrincipal) authentication.getPrincipal();
+        return ResponseEntity.ok(authService.updateProfile(principal, request));
+    }
+
+    @PostMapping("/change-password")
+    public ResponseEntity<Void> changePassword(
+            @Valid @RequestBody ChangePasswordRequest request,
+            Authentication authentication
+    ) {
+        UserPrincipal principal = (UserPrincipal) authentication.getPrincipal();
+        authService.changePassword(principal, request);
+        return ResponseEntity.noContent().build();
+    }
+
+    @DeleteMapping("/me")
+    public ResponseEntity<Void> deleteMyAccount(
+            @RequestHeader(value = "Authorization", required = false) String authHeader,
+            @Valid @RequestBody DeleteAccountRequest request,
+            Authentication authentication
+    ) {
+        UserPrincipal principal = (UserPrincipal) authentication.getPrincipal();
+        String token = (authHeader != null && authHeader.startsWith("Bearer ")) ? authHeader.substring(7) : null;
+        authService.deleteMyAccount(principal, token, request);
+        return ResponseEntity.noContent().build();
+    }
 }
 

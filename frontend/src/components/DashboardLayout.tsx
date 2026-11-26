@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
-import { LogOut, Moon, Sun, type LucideIcon } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import { LogOut, Moon, Settings, Sun, type LucideIcon } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useTheme } from '../context/ThemeContext';
 import BrandLogo from './BrandLogo';
@@ -85,12 +86,20 @@ export default function DashboardLayout({
               {user?.fullName}
             </div>
             <div className="truncate font-mono text-[11px] text-zinc-500">{user?.email}</div>
-            <button
-              onClick={logout}
-              className="mt-3 flex w-full items-center justify-center gap-1.5 rounded-lg border border-zinc-200 bg-white py-1.5 text-xs font-semibold text-zinc-700 transition hover:border-rose-500/40 hover:text-rose-600 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:text-rose-400"
-            >
-              <LogOut className="h-3.5 w-3.5" /> Sign Out
-            </button>
+            <div className="mt-3 grid grid-cols-2 gap-1.5">
+              <Link
+                to="/settings"
+                className="flex items-center justify-center gap-1 rounded-lg border border-zinc-200 bg-white py-1.5 text-xs font-semibold text-zinc-700 transition hover:border-[#FF3366]/40 hover:text-[#FF3366] dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300"
+              >
+                <Settings className="h-3.5 w-3.5" /> Settings
+              </Link>
+              <button
+                onClick={logout}
+                className="flex items-center justify-center gap-1 rounded-lg border border-zinc-200 bg-white py-1.5 text-xs font-semibold text-zinc-700 transition hover:border-rose-500/40 hover:text-rose-600 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:text-rose-400"
+              >
+                <LogOut className="h-3.5 w-3.5" /> Sign Out
+              </button>
+            </div>
           </div>
         </div>
       </aside>
@@ -120,6 +129,14 @@ export default function DashboardLayout({
             >
               {theme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
             </button>
+
+            <Link
+              to="/settings"
+              title="Account Settings"
+              className="flex h-9 w-9 items-center justify-center rounded-xl border border-zinc-200 bg-white text-zinc-600 transition hover:border-[#FF3366]/40 hover:text-[#FF3366] lg:hidden dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300"
+            >
+              <Settings className="h-4 w-4" />
+            </Link>
 
             <button
               onClick={logout}

@@ -1,13 +1,18 @@
 package com.ticketdrop.core.service;
 
+import com.ticketdrop.core.audit.Audited;
 import com.ticketdrop.core.domain.entity.OrganizerProfile;
 import com.ticketdrop.core.domain.entity.User;
 import com.ticketdrop.core.domain.enums.ApprovalStatus;
+import com.ticketdrop.core.domain.enums.EventStatus;
 import com.ticketdrop.core.domain.enums.Role;
+import com.ticketdrop.core.domain.enums.TicketStatus;
 import com.ticketdrop.core.domain.enums.UserStatus;
 import com.ticketdrop.core.dto.AuthDtos.*;
 import com.ticketdrop.core.exception.ApiException;
+import com.ticketdrop.core.repository.EventRepository;
 import com.ticketdrop.core.repository.OrganizerProfileRepository;
+import com.ticketdrop.core.repository.TicketRepository;
 import com.ticketdrop.core.repository.UserRepository;
 import com.ticketdrop.core.security.JwtService;
 import com.ticketdrop.core.security.RedisTokenService;
@@ -27,6 +32,8 @@ public class AuthService {
 
     private final UserRepository userRepository;
     private final OrganizerProfileRepository organizerProfileRepository;
+    private final TicketRepository ticketRepository;
+    private final EventRepository eventRepository;
     private final PasswordEncoder passwordEncoder;
     private final JwtService jwtService;
     private final RedisTokenService redisTokenService;
@@ -34,12 +41,16 @@ public class AuthService {
     public AuthService(
             UserRepository userRepository,
             OrganizerProfileRepository organizerProfileRepository,
+            TicketRepository ticketRepository,
+            EventRepository eventRepository,
             PasswordEncoder passwordEncoder,
             JwtService jwtService,
             RedisTokenService redisTokenService
     ) {
         this.userRepository = userRepository;
         this.organizerProfileRepository = organizerProfileRepository;
+        this.ticketRepository = ticketRepository;
+        this.eventRepository = eventRepository;
         this.passwordEncoder = passwordEncoder;
         this.jwtService = jwtService;
         this.redisTokenService = redisTokenService;
@@ -151,6 +162,101 @@ public class AuthService {
                 ? organizerProfileRepository.findByUserId(user.getId()).orElse(null)
                 : null;
         return toSummary(user, profile);
+    }
+
+    @Transactional
+    @Audited(action = "PROFILE_UPDATED", resourceType = "USER")
+    public UserSummary updateProfile(UserPrincipal principal, UpdateProfileRequest req) {
+        User user = userRepository.findById(principal.id())
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "User Not Found", "Authenticated user not found."));
+        user.setFullName(req.fullName().trim());
+        user = userRepository.save(user);
+
+        OrganizerProfile profile = null;
+        if (user.getRole() == Role.ADMIN) {
+            profile = organizerProfileRepository.findByUserId(user.getId()).orElse(null);
+            if (profile != null) {
+                if (req.orgName() != null && !req.orgName().isBlank()) {
+                    profile.setOrgName(req.orgName().trim());
+                }
+                if (req.registrationNo() != null) {
+                    profile.setRegistrationNo(req.registrationNo().trim());
+                }
+                profile = organizerProfileRepository.save(profile);
+            }
+        }
+        return toSummary(user, profile);
+    }
+
+    @Transactional
+    @Audited(action = "PASSWORD_CHANGED", resourceType = "USER")
+    public void changePassword(UserPrincipal principal, ChangePasswordRequest req) {
+        User user = userRepository.findById(principal.id())
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "User Not Found", "Authenticated user not found."));
+        if (!passwordEncoder.matches(req.currentPassword(), user.getPasswordHash())) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "Incorrect Password", "Your current password is incorrect.");
+        }
+        user.setPasswordHash(passwordEncoder.encode(req.newPassword()));
+        userRepository.save(user);
+    }
+
+    /**
+     * Safe GDPR Soft-Delete & Anonymization:
+     * Preserves financial/audit foreign keys while blocking deletion if active passes or live events exist.
+     */
+    @Transactional
+    @Audited(action = "ACCOUNT_DELETED", resourceType = "USER")
+    public void deleteMyAccount(UserPrincipal principal, String bearerToken, DeleteAccountRequest req) {
+        User user = userRepository.findById(principal.id())
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "User Not Found", "Account not found."));
+        if (user.getRole() == Role.SUPER_ADMIN) {
+            throw new ApiException(HttpStatus.FORBIDDEN, "Protected Account", "SUPER_ADMIN accounts cannot be self-deleted.");
+        }
+        if (!passwordEncoder.matches(req.password(), user.getPasswordHash())) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "Incorrect Password", "Password verification failed. Account was not deleted.");
+        }
+
+        if (user.getRole() == Role.USER) {
+            boolean hasActiveTickets = ticketRepository.findByOwnerIdOrderByIssuedAtDesc(user.getId()).stream()
+                    .anyMatch(t -> t.getStatus() == TicketStatus.ACTIVE || t.getStatus() == TicketStatus.RESALE_LISTED);
+            if (hasActiveTickets) {
+                throw new ApiException(
+                        HttpStatus.CONFLICT,
+                        "Active Passes Exist",
+                        "You still have active passes or resale listings. Please use, resell, or cancel them before deleting your account."
+                );
+            }
+        } else if (user.getRole() == Role.ADMIN) {
+            OrganizerProfile profile = organizerProfileRepository.findByUserId(user.getId()).orElse(null);
+            if (profile != null) {
+                boolean hasLiveEvents = eventRepository.findByOrganizerIdOrderByCreatedAtDesc(profile.getId()).stream()
+                        .anyMatch(e -> e.getStatus() == EventStatus.PUBLISHED || e.getStatus() == EventStatus.SOLD_OUT);
+                if (hasLiveEvents) {
+                    throw new ApiException(
+                            HttpStatus.CONFLICT,
+                            "Live Events Exist",
+                            "You have live published events. Please complete or cancel them before deleting your organizer account."
+                    );
+                }
+                profile.setApprovalStatus(ApprovalStatus.SUSPENDED);
+                profile.setOrgName("Deleted Organization");
+                organizerProfileRepository.save(profile);
+            }
+        }
+
+        user.setFullName("Deleted Account");
+        user.setEmail("deleted-" + user.getId() + "@deleted.ticketdrop.ai");
+        user.setStatus(UserStatus.BANNED);
+        userRepository.save(user);
+
+        redisTokenService.markUserBanned(user.getId());
+        if (bearerToken != null && !bearerToken.isBlank()) {
+            try {
+                Claims accessClaims = jwtService.parseClaims(bearerToken);
+                redisTokenService.blacklistAccessToken(accessClaims.getId(), accessClaims.getExpiration().toInstant());
+            } catch (JwtException ignored) {
+            }
+        }
     }
 
     private AuthResponse issueTokens(User user, OrganizerProfile profile) {

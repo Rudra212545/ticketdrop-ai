@@ -35,6 +35,21 @@ public final class AuthDtos {
             String refreshToken
     ) {}
 
+    public record UpdateProfileRequest(
+            @NotBlank @Size(min = 2, max = 150) String fullName,
+            @Size(max = 150) String orgName,
+            @Size(max = 100) String registrationNo
+    ) {}
+
+    public record ChangePasswordRequest(
+            @NotBlank String currentPassword,
+            @NotBlank @Size(min = 8, max = 100) String newPassword
+    ) {}
+
+    public record DeleteAccountRequest(
+            @NotBlank String password
+    ) {}
+
     public record UserSummary(
             UUID id,
             String email,
